@@ -1,95 +1,99 @@
-# Talon — Acquisition Agent
+# Talon
 
-> Acquire a host's forensic story — live or dead-box — into one signed, hash-verified bundle.
+Cross-platform acquisition agent for the [Citadel](https://github.com/sltcnb/citadel) pipeline. Collects Windows, Linux and macOS artifacts into one hash-verified ZIP.
 
-**Status: built** — live and dead-box collection across Windows, Linux, and macOS; gRPC remote agent (mTLS) and S3/MinIO upload paths.
-
-Talon is the first stage of the pipeline: it walks a host (or a mounted image / raw device) and gathers forensic artifacts into a portable **artifact bundle**. It owns the per-OS artifact catalog — 56 Windows categories, 21 Linux, 12 macOS — and is the *source of truth* for what is collectable; Citadel renders its collection UI straight from Talon's `capabilities.yaml` and holds no artifact knowledge of its own.
-
-## Pipeline position
-
-```
-Talon ──bundle──▶ Sluice ──▶ Babel ──▶ Rosetta ──▶ …
-```
-
-First node. Runs on the endpoint (live) or against a mount/device (dead-box), and hands a bundle to **Sluice**.
-
-## Inputs → Outputs
-
-- **Inputs** — a live host filesystem, a mounted volume (dead-box), or a raw block device (optionally with a BitLocker recovery key); plus the artifact categories to gather. No bus/stdin input.
-- **Output** — an **artifact bundle** conforming to `contracts/bundle_manifest/v1.json`:
-  ```
-  bundle/  manifest.json | events.jsonl | blobs/<sha256> | bundle.sha256
-  ```
-  `manifest.json` carries `session_id`, `hostname`, `os`, timestamps, and an `artifacts[]` list with per-file `sha256` / `size` / `category`.
-
-## Contracts
-
-Sourced from `brick.yaml`; all contracts are versioned in the [citadel-contracts](https://github.com/sltcnb/citadel-contracts) repo (`pip install git+https://github.com/sltcnb/citadel-contracts`).
-
-- **Consumes** — nothing from the bus (`content_types: []`); Talon reads live hosts, mounts, and raw devices.
-- **Produces** — `contracts/bundle_manifest/v1.json` (the artifact bundle manifest), any artifact type (~80 categories).
-- **Speaks** — `contracts/collector.proto` (`citadel.collector.v1.Collector` gRPC service) for the remote agent path.
+Talon runs against a live host, an already-mounted volume, or a raw block device, and writes a triage ZIP. With `--bundle-manifest` it also emits a `manifest.json` describing every artifact it collected, which is what [Sluice](https://github.com/sltcnb/sluice) validates against `bundle_manifest.schema.json`. It can hand the result straight to a Citadel API, or leave it on disk.
 
 ## Install
 
 ```bash
-git clone https://github.com/sltcnb/talon && cd talon
-pip install -e .            # provides the `talon` console script (collect:main); Python >= 3.11
+pip install git+https://github.com/sltcnb/talon
 ```
 
-Runtime is stdlib-only (`dependencies = []` in `pyproject.toml`); `requirements-build.txt` only carries PyInstaller for the `build.sh` / `build.bat` single-binary builds. boto3 is optional for the credentialed S3 path in `fo_uploader.py`.
-
-## Configuration
-
-No operator environment variables — Talon is configured via CLI flags, optionally merged over a `config.json` shipped next to the script (embedded-config mode for packaged agents; CLI always wins). The Windows OS variables it reads (`SystemDrive`, `SystemRoot`, `ProgramData`) only locate artifacts on the target host.
-
-## Run standalone
+Python 3.11 or newer. To build a standalone binary for a host without Python:
 
 ```bash
-talon                                              # all OS defaults, live host
-talon --collect evtx,registry,prefetch             # selective live collection
-talon --path /mnt/windows --collect registry,evtx  # dead-box: mounted volume
-talon --disk /dev/sdb1 --bitlocker-key 123456-...  # dead-box: raw device + BitLocker
-talon --output /tmp/evidence.zip                   # write a local ZIP
-talon --output /tmp/evidence/                      # a directory works too — the ZIP name is generated inside it
-talon --api-url http://citadel/api/v1 --case-id IR-001 --api-token <tok>   # upload to a case
-talon --fetch "mimikatz*" --fetch "re:\.(ps1|hta)$" --fetch-root C:\Users  # IOC file sweep
-talon --dry-run --verbose                          # preview, collect nothing
+./build.sh     # Linux and macOS
+build.bat      # Windows
 ```
 
-Key flags: `--collect` (comma-separated categories), `--path` / `--disk` / `--bitlocker-key` (dead-box), `--output`/`-o`, `--api-url` / `--case-id` / `--api-token` (Citadel upload), `--fetch` / `--fetch-root` / `--fetch-max-files` / `--fetch-max-mb` (filename or `re:` regex search), `--bundle-manifest`, `--skip-problematic`, `--dry-run`, `--verbose`/`-v`.
+## Collecting
 
-When `--collect` is omitted the OS default set is used (e.g. Windows: evtx, registry, prefetch, lnk, browser, tasks, mft, triage, sysmon, antivirus).
+Live host, everything in the default set:
 
-Health check (declared in `brick.yaml`): `talon --version`.
+```bash
+talon --case-id IR-2026-014 --output ./triage.zip
+```
+
+Pick categories:
+
+```bash
+talon --case-id IR-2026-014 --collect evtx,registry,mft,prefetch --output ./triage.zip
+```
+
+Around 80 artifact categories exist across the three platforms; Windows alone declares 56, grouped in `capabilities.yaml` as Core System, Network and Devices, Security and Defense, Browsers, Email, Messaging, Cloud Sync, Remote Access, Applications and User Data, Infrastructure, Live Triage, and Heavy / Opt-in. Heavy categories (memory, PE, documents, printing) are opt-in.
+
+Dead-box against a mounted image:
+
+```bash
+talon --path /mnt/evidence --collect evtx,mft --output ./triage.zip --skip-problematic
+```
+
+Linux can mount a raw device itself, with `ntfs-3g` or `dislocker` present:
+
+```bash
+talon --disk /dev/sdb1 --bitlocker-key <recovery-key> --output ./triage.zip
+```
+
+The BitLocker key stays local and is never written to `config.json`.
+
+## Hunting for files by name
+
+`--fetch` sweeps for files by glob or regex, repeatable and comma-separated:
+
+```bash
+talon --fetch 'mimikatz*' --fetch 're:\.(ps1|hta)$' --fetch-root C:/Users --output ./triage.zip
+```
+
+Capped by `--fetch-max-files` (200) and `--fetch-max-mb` (100 MB per file).
+
+## Options
+
+| Flag | Purpose |
+|---|---|
+| `--output`, `-o` | Output ZIP path, or a directory to write into |
+| `--case-id` | Case this collection belongs to |
+| `--api-url`, `--api-token` | Upload to a Citadel API instead of leaving it on disk |
+| `--collect` | Comma-separated category keys |
+| `--path` | Already-mounted filesystem root |
+| `--disk` | Raw block device, Linux only |
+| `--bitlocker-key` | BitLocker recovery key |
+| `--fetch`, `--fetch-root`, `--fetch-max-files`, `--fetch-max-mb` | Filename sweep |
+| `--bundle-manifest` | Also write a Citadel bundle `manifest.json` |
+| `--skip-problematic` | Skip categories known to fail in dead-box mode |
+| `--dry-run`, `--verbose` | |
+
+CLI arguments override the embedded `config.json`.
+
+## Remote agent
+
+`collector_server.py` serves collection over gRPC with mutual TLS, so you can drive an endpoint without shipping a shell. Client stubs come from `./generate_stubs.sh`. `secure_upload.py` and `fo_uploader.py` handle chunked, resumable upload to S3 or MinIO; `crypto.py` handles signing.
 
 ## Tests
 
 ```bash
-pytest tests/                       # test_chunker, test_secure_upload, test_stability
-python3 tests/test_chunker.py       # each file also runs standalone
+pip install pytest
+pytest -q
 ```
 
-## Remote agent (gRPC / mTLS)
-
-For fleet collection, Talon speaks the `citadel.collector.v1.Collector` gRPC service (`contracts/collector.proto`):
-
-- **Register / Heartbeat** — the agent enrolls and the server pushes collection tasks.
-- **UploadChunk** — resumable 8 MiB chunked upload with per-chunk SHA-256, optional AES-256-GCM sealing (X25519 ECDH → HKDF-SHA256, chunk offset as AAD). On reconnect the client resumes from `bytes_received`.
-
-Bundles can also land in **S3/MinIO** via presigned URLs (stdlib-only) or credentialed boto3 (`fo_uploader.py`).
-
-## In Citadel
-
-Talon's bundle is the unit Sluice consumes. In-app **Harvest** runs Talon server-side against a mounted image/path; the standalone agent uploads to a case over the API or gRPC. Editing `capabilities.yaml` (e.g. adding a collection category) changes the Citadel collector UI with no orchestrator code change.
+`pip install -e .` does not currently work. The repo is a flat layout with seven top-level modules and `pyproject.toml` does not declare which to package, so setuptools refuses. Run from a checkout.
 
 ## License
 
-[PolyForm Noncommercial 1.0.0](LICENSE) — run, modify and self-host for any
-**noncommercial** purpose. Commercial use requires prior written authorization
-signed by the copyright holder. See [LICENSING.md](LICENSING.md).
+[PolyForm Noncommercial 1.0.0](LICENSE). Run, modify and self-host it for any noncommercial purpose. Commercial use needs written authorization from the copyright holder; see [LICENSING.md](LICENSING.md).
 
-## Part of the Citadel suite
+This is a source-available license, not an OSI-approved open source license.
 
-Talon is the acquisition stage — the first node — of [Citadel](https://github.com/sltcnb/citadel). Upstream: none. Downstream (`brick.yaml` dependency): [Sluice](https://github.com/sltcnb/sluice), which receives bundles via gRPC or upload token. Contracts (`bundle_manifest`, `collector.proto`): [citadel-contracts](https://github.com/sltcnb/citadel-contracts).
+## Related
+
+[Citadel](https://github.com/sltcnb/citadel) · [Sluice](https://github.com/sltcnb/sluice) ingests the output · [citadel-contracts](https://github.com/sltcnb/citadel-contracts)
