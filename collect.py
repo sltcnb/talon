@@ -25,6 +25,9 @@ Build
 
 from __future__ import annotations
 
+# Keep in sync with pyproject.toml and brick.yaml.
+__version__ = "1.0.0"
+
 # ── Embedded configuration (injected by Citadel at download time) ─────────────
 # When non-empty, these values are used as defaults and can still be overridden
 # by CLI arguments.
@@ -186,6 +189,7 @@ class _Tee:
     killed mid-run. Never raises on the logging side — a broken log handle must
     not take down collection.
     """
+
 
     def __init__(self, console, logfh):
         self._console = console
@@ -5896,6 +5900,12 @@ def main() -> None:
         prog="fo-harvester",
         description="ForensicsOperator Harvester",
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"talon {__version__}",
+        help="Print the collector version and exit (brick.yaml health check)",
     )
     parser.add_argument(
         "--output",
